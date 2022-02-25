@@ -1,0 +1,640 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+library(Hmisc)
+library(caret)
+library(pdp)
+library(glmnet)
+library(vip)
+
+cerc <- read.csv("wave1_v6.csv")
+cerc$SEX <- factor(cerc$SEX, levels = c(0,1),labels = c("Female","Male"))
+```
+
+
+
+
+```{r}
+experiment <- c("Lovu","Mauritius","Pesqueiro","Tyva Republic","Yasawa")
+cerc.exp <- cerc[cerc$SITE %in% experiment,]
+cerc.exp <- rename(cerc.exp, OUT.L = COREL.L, OUT.S = COREL.S)
+
+ggplot(cerc.exp %>% pivot_longer(cols = c("OUT.L","OUT.S"),names_to = "Game", values_to = "Coins_Distant_Cup"),aes(x= Coins_Distant_Cup, fill = as.factor(Game)))+
+  geom_bar(position = "dodge")+
+  facet_wrap(~SITE)
+
+#cor(cerc$INGROUP,cerc$SELF,use = "complete.obs")
+```
+
+
+```{r}
+iv = c("AGE.C","SEX","FORMALED","CHILDREN","HONEST","TREATMENT","MMAT","MMATc","DIEPUN","LGDIEPUN","OMNI.BG","OMNI.LG","MBG","MLG","BGR1","LGR1","CORELEMO","INGREMO","OUTGREMO","CORELSIM","POLEVAL","INGFIRST")#punishment (DK =dont know), omnipotence, moralistic god,reward, emotionl proximity to  distant,local,outgrp,order
+dv = "OUT.L"
+
+iv_noquote = noquote(paste(iv,collapse ="+"))
+cerc.dat <- na.omit(cerc.exp[, c(iv,dv)])
+set.seed(42)
+train.index <- createDataPartition(y = cerc.dat$OUT.L, p = .7, list = FALSE)
+train.dat <- cerc.dat[train.index, ]
+test.dat <- cerc.dat[-train.index, ]
+```
+
+
+#### Converting categorical variables to dummy variables:
+
+```{r}
+
+#Converting every categorical variable to numerical using dummy variables 
+dmy <- dummyVars(OUT.L ~., data = train.dat,fullRank = T ) 
+
+x.train<- data.frame(predict(dmy, newdata = train.dat) )
+y.train <- train.dat[, dv]
+# str(x.train) 
+
+x.test<- data.frame(predict(dmy, newdata = test.dat) )
+y.test <- test.dat[, dv]
+
+# #check on test set:
+# factor.vars <- c("League", "Division", "NewLeague")
+# new.vars <- c("League.N", "Division.W", "NewLeague.N")
+# cbind(test.dat[, factor.vars], x.test[, new.vars] )
+
+```
+
+#### Standardizing the predictors:
+
+```{r}
+
+pp.model <- preProcess(x.train, method=c("center", "scale"))
+x.train <- predict(pp.model, newdata = x.train)
+x.test <- predict(pp.model, newdata = x.test)
+
+# Append the Y variable
+train.dat <- cbind(x.train, OUT.L = y.train)
+# train.dat
+test.dat <- cbind(x.test, OUT.L = y.test)
+# test.dat
+
+```
+
+
+
+
+
+```{r}
+alpha.vec <- seq(0, 1, by = 0.1)
+lambda.vec <- seq(0, 100, length.out = 100)
+elasticgrid <- expand.grid(alpha = alpha.vec, lambda = lambda.vec)
+
+tr.Control <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10
+                           )
+
+set.seed(42)
+lm1 <- train(OUT.L~., 
+             method = "lm",
+             trControl = tr.Control,
+             data = train.dat)  ##includes all possible 2 way interactions
+
+set.seed(42)
+elastic1 <- train(OUT.L~ ., data = train.dat, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid
+             
+                )
+
+lm1$results
+elastic1$results 
+elastic1$results[ rownames(elastic1$bestTune), ] ##ridge regression > lm
+
+```
+```{r}
+vi(elastic1)
+varimp.elastic <- varImp(elastic1)
+
+plot(varimp.elastic, main="Variable Importance: elastic")
+
+var_i <- unique(c(vi(lm1)[1:10,]$Variable,vi(elastic1)[1:10,]$Variable))  #12 variables
+
+train.dat2 <- train.dat[,c(dv,var_i)]
+test.dat2 <- test.dat[,c(dv,var_i)]
+
+alpha.vec <- seq(0, 1, by = 0.1)
+lambda.vec <- seq(0, 100, length.out = 100)
+elasticgrid <- expand.grid(alpha = alpha.vec, lambda = lambda.vec)
+
+tr.Control <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10
+                           )
+
+set.seed(42)
+lm2 <- train(OUT.L~., 
+             method = "lm",
+             trControl = tr.Control,
+             data = train.dat2)  ##includes all possible 2 way interactions
+
+set.seed(42)
+elastic2 <- train(OUT.L~ ., data = train.dat2, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid
+             
+                )
+
+lm2$results
+elastic2$results 
+elastic2$results[ rownames(elastic1$bestTune), ]
+```
+
+
+```{r}
+##includes all interactive terms
+
+set.seed(42)
+lm2.inter <- train(OUT.L~.^2, 
+             method = "lm",
+             trControl = tr.Control,
+             data = train.dat2)  ##includes all possible 2 way interactions
+
+set.seed(42)
+elastic2.inter <- train(OUT.L~.^2 , data = train.dat2, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid)
+
+lm2.inter$results
+
+elastic2.inter$results[ rownames(elastic1$bestTune), ]
+
+vi(elastic2.inter)
+var_i.inter <- unique(c(vi(lm2.inter)[1:10,]$Variable,vi(elastic1)[1:10,]$Variable))
+var_i.inter[c(1,3:8,10)]
+#include these interactions
+
+
+
+```
+```{r}
+set.seed(42)
+lm2.inter2 <- train(OUT.L~. + OMNI.BG:LGR1+OMNI.BG:DIEPUN + INGFIRST:MBG+  
+OMNI.BG:OMNI.LG +LGR1:CORELSIM+POLEVAL:OMNI.LG + DIEPUN:OMNI.LG +SEX.Male:MBG, 
+             method = "lm",
+             trControl = tr.Control,
+             data = train.dat2)  ##includes all possible 2 way interactions
+
+set.seed(42)
+elastic2.inter2 <- train(OUT.L~. + OMNI.BG:LGR1 +OMNI.BG:DIEPUN + INGFIRST:MBG+  
+OMNI.BG:OMNI.LG +LGR1:CORELSIM+POLEVAL:OMNI.LG + DIEPUN:OMNI.LG +SEX.Male:MBG, data = train.dat2, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid)
+
+lm2.inter2$results
+
+elastic2.inter2$results[ rownames(elastic1$bestTune), ]  #ridge
+```
+
+
+
+```{r}
+
+## Getting the best model across methods:
+
+### Using resamples() of CV results
+
+model.resamples <- resamples( list(regression = lm2.inter2, 
+                                   Elastic_Net = elastic2.inter2) )
+
+summary(model.resamples)
+```
+
+
+### Plotting the CV fold performance of best model of different methods.
+
+
+
+```{r}
+
+head( model.resamples$values)
+
+dotplot(model.resamples, metric = "RMSE")
+dotplot(model.resamples, metric = "Rsquared")
+
+```
+
+### We can compare the CV resamples using t-tests b/w different methods
+
+```{r}
+
+# comapre best models of all methods:
+summary( diff(model.resamples, metric = "RMSE") )
+
+#compare two models:
+compare_models(elastic2.inter2, lm2.inter2
+               # , metric = "RMSE"
+               )
+
+```
+
+
+## Predictive accuracy of best model:
+
+```{r}
+
+pred.elastic <- predict(elastic2.inter2, newdata = test.dat2)
+pred.lm <- predict(lm2.inter2, newdata = test.dat2)
+
+# use caret functions to getRMSE and Rsquare:
+#   caret:::RMSE = RMSE(pred.elastic, test.dat$Salary)
+# Rsquare = R2(pred.elastic, test.dat$Salary)
+
+#-------------
+get_error.fn <- function(Y.pred, Y.raw){
+  rmse = RMSE(Y.pred, Y.raw)
+Rsquare = R2(Y.pred, Y.raw)
+return(data.frame(rmse, Rsquare))
+}
+#-------------
+pred.elastic <- predict(elastic2.inter2, newdata = test.dat2)
+pred.lm <- predict(lm2.inter2, newdata = test.dat2)
+get_error.fn(pred.elastic, test.dat2$OUT.L)
+get_error.fn(pred.lm, test.dat2$OUT.L)
+
+##simple model
+pred.elastic <- predict(elastic1, newdata = test.dat)
+pred.lm <- predict(lm1, newdata = test.dat)
+get_error.fn(pred.elastic, test.dat$OUT.L)
+get_error.fn(pred.lm, test.dat$OUT.L) 
+
+#complex
+pred.elastic <- predict(elastic2, newdata = test.dat)
+pred.lm <- predict(lm2, newdata = test.dat)
+get_error.fn(pred.elastic, test.dat$OUT.L)
+get_error.fn(pred.lm, test.dat$OUT.L)  #simple model is better for linear model; complex model better for elasticchoose simple model (lm2.inter poorest)
+
+##choose simple model
+
+
+
+
+```
+## Estimating the uncertainty in test prediction.
+
+### 1. Getting bootstrap of test predictions of best model:
+
+Here, elastic is the best model.
+
+```{r}
+
+#-----------------------------------------
+#-----------------------------------------
+boot.test.fn <- function(sample.dat, dv, best.model, boot.iters){
+  
+  boot.dat <- data.frame(RMSE = NULL, Rsquare = NULL)
+  
+  for(i in 1:boot.iters){
+    
+    boot.index <- sample(1:nrow(sample.dat), replace = TRUE)
+    boot.test <- sample.dat[ boot.index, ]
+    boot.pred <- predict(best.model, newdata = boot.test )
+
+    require(caret)
+    boot.rmse <- RMSE( boot.pred, boot.test[, dv]   )
+    boot.Rsquare <- R2( boot.pred, boot.test[, dv]   )
+    
+    boot.dat <- rbind( boot.dat, cbind(RMSE = boot.rmse, 
+                                       Rsquare = boot.Rsquare)
+                       )
+    
+  } # end of boot.iters
+  
+  return(boot.dat)
+  
+} # end of boot.function
+#------------------------------------------
+#-----------------------------------------
+```
+
+### Bootstrapping test performance:
+
+```{r}
+boot.iterations = 1000
+
+
+set.seed(12345)
+elastic.test.dat <- boot.test.fn( test.dat, dv, elastic2,  boot.iterations )
+
+set.seed(12345)
+lm.test.dat <- boot.test.fn( test.dat, dv, lm2,  boot.iterations )
+
+
+
+elastic.test.dat$method = "Elastic"
+lm.test.dat$method = "Regression"
+
+boot.results.dat <- rbind(elastic.test.dat, lm.test.dat)
+
+boot.long <- reshape2::melt(boot.results.dat, 
+                            id.vars = "method",
+                            variable.name = "Error.type",
+                            value.name = "accuracy")
+
+boot.long %>% 
+  group_by(method, Error.type) %>% 
+  dplyr::summarize(SE = sd(accuracy, na.rm = TRUE) )
+
+library(ggplot2)
+# library(Hmisc)
+ggplot(boot.long, aes(x = method, y = accuracy)) +
+  stat_summary(fun.data = mean_sdl,
+               fun.args = list(mult = 1),
+               geom = "pointrange"
+               ) +
+  facet_wrap(~Error.type, scales = "free") +
+  theme_bw()
+
+
+# ggplot(boot.long, aes(x = method, y = accuracy)) +
+#   stat_summary(fun.data = mean_se,
+#                geom = "pointrange"
+#                ) +
+#   facet_wrap(~Error.type, scales = "free") +
+#   theme_bw()
+
+```
+
+
+
+
+### plotting original test performance estimates in the bootstrap plot:
+```{r}
+
+#-------------
+get_error.fn <- function(Y.pred, Y.raw){
+  RMSE = RMSE(Y.pred, Y.raw)
+Rsquare = R2(Y.pred, Y.raw)
+return(data.frame(RMSE, Rsquare))
+}
+#-------------
+elastic.err <- get_error.fn(pred.elastic, test.dat$OUT.L)
+lm.err <- get_error.fn(pred.lm, test.dat$OUT.L)
+
+est.dat <- rbind(elastic.err, lm.err)
+est.dat$method = c("Elastic", "Regression")
+
+est.long <-  reshape2::melt(est.dat, 
+                            id.vars = "method",
+                            variable.name = "Error.type",
+                            value.name = "accuracy")
+
+
+
+library(ggplot2)
+# library(Hmisc)
+ggplot(boot.long, aes(x = method, y = accuracy)) +
+  stat_summary(fun.data = mean_sdl, #the package Hmisc is required for this argument to work properly
+               fun.args = list(mult = 1), # the default gives the 95%CIs, but this argument specifies 1 SD.
+               geom = "pointrange"
+               ) +
+  facet_wrap(~Error.type, scales = "free") +
+  theme_bw() +
+  # geom_hline(data = est.long, aes(yintercept = accuracy, color = method)) +
+  geom_point(data = est.long, size = 2, shape = 2, color = "red")
+
+
+```
+
+
+
+**Since Bootstrap estimates can be biased from population  values, we focus more on the spread (SE values) we can get from bootstrap.**
+
+### plotting test est with bootstrap SE:
+
+```{r}
+
+# get the bootstrap estimates of error/accuracy SE:
+boot.se <- boot.results.dat %>% 
+  group_by (method) %>% 
+  dplyr::summarize( across(where(is.numeric), sd, na.rm = TRUE  )  )
+
+
+# plyr::ddply(boot.dat, "method", function(x){
+#   RMSE <- sd(x$RMSE, na.rm = TRUE)
+#   Rsquare <- sd(x$Rsquare, na.rm = TRUE)
+#   cbind(RMSE, Rsquare)
+# })
+
+
+boot.se
+```
+
+
+```{r}
+
+se.long <-  reshape2::melt(boot.se, 
+                            id.vars = "method",
+                            variable.name = "Error.type",
+                            value.name = "SE")
+
+# Get test sample's error estimate: (this we have done before as well)
+#-------------
+get_error.fn <- function(Y.pred, Y.raw){
+  RMSE = RMSE(Y.pred, Y.raw)
+Rsquare = R2(Y.pred, Y.raw)
+return(data.frame(RMSE, Rsquare))
+}
+#-------------
+elastic.err <- get_error.fn(pred.elastic, test.dat$OUT.L)
+lm.err <- get_error.fn(pred.lm, test.dat$OUT.L)
+
+est.dat <- rbind(elastic.err, lm.err)
+est.dat$method = c("Elastic", "Regression")
+
+est.long <-  reshape2::melt(est.dat, 
+                            id.vars = "method",
+                            variable.name = "Error.type",
+                            value.name = "accuracy")
+
+
+est.long <- merge(est.long, se.long, by = c("method", "Error.type"))
+est.long
+```
+
+
+
+
+
+```{r}
+# Now plot the test estimate with bootstrap SE:
+
+library(ggplot2)
+
+ggplot(est.long, aes(x = method, y = accuracy)) +
+  geom_point(size = 2) +
+  facet_wrap(~Error.type, scales = "free") +
+  theme_bw() +
+  geom_pointrange(aes(ymin = accuracy - SE, ymax = accuracy + SE ))
+
+
+```
+
+
+```{r}
+varimp.elastic <- varImp(elastic1)
+
+
+
+
+
+
+
+plot(varimp.elastic, main="Variable Importance: elastic")
+
+
+library(vip)
+
+vi(elastic1)
+vip(elastic1, geom = "point") + 
+  theme_light()
+```
+
+```{r}
+#REFIT
+
+iv = vi(elastic1)[vi(elastic1)$Importance > 50,]$Variable
+train.dat <- train.dat[,c(iv,dv)]
+test.dat <- test.dat[,c(iv,dv)]
+
+
+alpha.vec <- seq(0, 1, by = 0.1)
+lambda.vec <- seq(0, 100, length.out = 100)
+elasticgrid <- expand.grid(alpha = alpha.vec, lambda = lambda.vec)
+
+tr.Control <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10
+                           )
+
+set.seed(30825920)
+lm1 <- train(OUT.L~ ., 
+             method = "lm",
+             trControl = tr.Control,
+             data = train.dat)
+
+set.seed(30825920)
+elastic1 <- train(OUT.L ~ ., data = train.dat, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid
+             
+                )
+
+lm1$results
+elastic1$results 
+elastic1$results[ rownames(elastic1$bestTune), ] ##ridge regression > lm
+```
+
+```{r}
+
+set.seed(42)
+lm2 <- train(OUT.La ~ .^2, method = "lm",
+             trControl = tr.Control,
+             data = train.dat)  #includes all possible interactions
+
+lm2$results
+
+```
+
+```{r}
+set.seed(42)
+lm2 <- train(OUT.L ~ .^2, method = "lm",
+             trControl = tr.Control,
+             data = train.dat)  #includes all possible interactions
+
+lm2$results
+```
+
+```{r}
+alpha.vec <- seq(0, 1, by = 0.1)
+lambda.vec <- seq(0, 100, length.out = 100)
+elasticgrid <- expand.grid(alpha = alpha.vec, lambda = lambda.vec)
+
+tr.Control <- trainControl(## 10-fold CV
+                           method = "repeatedcv",
+                           number = 10,
+                           ## repeated ten times
+                           repeats = 10
+                           )
+
+
+set.seed(30825920)
+elastic1 <- train(OUT.L ~ .^2, data = train.dat, 
+                 method = 'glmnet', 
+                 trControl = tr.Control,
+                 verbose = FALSE,
+                 preProcess = c("center", "scale"),
+                tuneGrid = elasticgrid
+             
+                )
+
+elastic1$results[ rownames(elastic1$bestTune), ]
+
+```
+
+```{r}
+vi(elastic1)
+vip(elastic1, geom = "point") + 
+  theme_light()
+```
+
+
+
+
+
+
+
+
+
+```{r}
+#Trree
+
+tr.ctrl <- trainControl(method = "repeatedcv", 
+                         number = 10, 
+                         repeats = 10
+                       )
+
+set.seed(42)
+
+tree.fit <- train(OUT.L ~ .^2 , data = train.dat, trControl = tr.ctrl,
+                  metric = "Rsquared",
+                 , preProcess = c("center", "scale")
+                 , tuneGrid = expand.grid(cp = seq(.00001, 1, length.out = 100)))
+```
+
+
+
+
+
